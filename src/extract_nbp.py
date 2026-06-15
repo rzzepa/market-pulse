@@ -71,7 +71,8 @@ def get_last_date(currency: str, engine) -> date:
 
 
 def get_gaps(currency: str, engine) -> list:
-    """Znajduje luki w danych - dni robocze bez notowania."""
+    import holidays as hl
+
     query = text("""
         SELECT date FROM exchange_rates
         WHERE currency_code = :currency
@@ -86,11 +87,16 @@ def get_gaps(currency: str, engine) -> list:
     start = min(daty_w_bazie)
     end   = max(daty_w_bazie)
 
+    pl_holidays = hl.Poland(years=range(start.year, end.year + 1))
+
     wszystkie_dni_robocze = set(
         d for d in pd.date_range(start, end, freq="B").date
     )
 
-    luki = sorted(wszystkie_dni_robocze - daty_w_bazie)
+    luki = sorted(
+        d for d in wszystkie_dni_robocze - daty_w_bazie
+        if d not in pl_holidays
+    )
     return luki
 
 

@@ -84,7 +84,8 @@ def get_last_date_stock(ticker: str, engine) -> date:
 
 
 def get_gaps_stock(ticker: str, engine) -> list:
-    """Znajduje luki w danych dla danego tickera."""
+    import holidays as hl
+
     query = text("""
         SELECT date FROM stock_prices
         WHERE ticker = :ticker
@@ -99,11 +100,23 @@ def get_gaps_stock(ticker: str, engine) -> list:
     start = min(daty_w_bazie)
     end   = max(daty_w_bazie)
 
+    # swieta dla US (NYSE) i PL (GPW)
+    us_holidays = hl.US(years=range(start.year, end.year + 1))
+    pl_holidays = hl.Poland(years=range(start.year, end.year + 1))
+
     wszystkie_dni_robocze = set(
         d for d in pd.date_range(start, end, freq="B").date
     )
 
-    luki = sorted(wszystkie_dni_robocze - daty_w_bazie)
+    def is_holiday(d, ticker):
+        if ticker.endswith(".WA"):
+            return d in pl_holidays
+        return d in us_holidays
+
+    luki = sorted(
+        d for d in wszystkie_dni_robocze - daty_w_bazie
+        if not is_holiday(d, ticker)
+    )
     return luki
 
 

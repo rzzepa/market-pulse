@@ -6,3 +6,4 @@ yfinance
 streamlit
 matplotlib
 python-dotenv
+holidays

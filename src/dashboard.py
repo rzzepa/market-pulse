@@ -13,6 +13,52 @@ st.title("Market Pulse")
 
 engine = get_engine()
 
+
+@st.cache_data(ttl=3600)
+def get_exchange_rates(waluty: tuple, start, end) -> pd.DataFrame:
+    query = text("""
+        SELECT date, currency_code, rate
+        FROM exchange_rates
+        WHERE currency_code = ANY(:waluty)
+          AND date BETWEEN :start AND :end
+        ORDER BY date
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn,
+                           params={"waluty": list(waluty), "start": start, "end": end})
+
+
+@st.cache_data(ttl=3600)
+def get_stock_prices(ticker: str, start, end) -> pd.DataFrame:
+    query = text("""
+        SELECT date, open, high, low, close, volume
+        FROM stock_prices
+        WHERE ticker = :ticker
+          AND date BETWEEN :start AND :end
+        ORDER BY date
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn,
+                           params={"ticker": ticker, "start": start, "end": end})
+
+
+@st.cache_data(ttl=3600)
+def get_currencies() -> list:
+    with engine.connect() as conn:
+        return [r[0] for r in conn.execute(
+            text("SELECT DISTINCT currency_code FROM exchange_rates ORDER BY 1")
+        )]
+
+
+@st.cache_data(ttl=3600)
+def get_tickers() -> list:
+    with engine.connect() as conn:
+        return [r[0] for r in conn.execute(
+            text("SELECT DISTINCT ticker FROM stock_prices ORDER BY 1")
+        )]
+
+
+# ── SIDEBAR ───────────────────────────────────────────────
 st.sidebar.header("Filtry")
 widok = st.sidebar.radio("Widok", ["Kursy walut", "Akcje"])
 
@@ -25,28 +71,14 @@ with col2:
 # ── KURSY WALUT ───────────────────────────────────────────
 if widok == "Kursy walut":
 
-    with engine.connect() as conn:
-        waluty = [r[0] for r in conn.execute(
-            text("SELECT DISTINCT currency_code FROM exchange_rates ORDER BY 1")
-        )]
-
+    waluty  = get_currencies()
     wybrane = st.sidebar.multiselect("Waluty", waluty, default=waluty[:2])
 
     if not wybrane:
         st.warning("Wybierz przynajmniej jedna walute.")
         st.stop()
 
-    query = text("""
-        SELECT date, currency_code, rate
-        FROM exchange_rates
-        WHERE currency_code = ANY(:waluty)
-          AND date BETWEEN :start AND :end
-        ORDER BY date
-    """)
-
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn,
-                         params={"waluty": wybrane, "start": start, "end": end})
+    df = get_exchange_rates(tuple(wybrane), start, end)
 
     if df.empty:
         st.warning("Brak danych dla wybranego zakresu.")
@@ -93,38 +125,19 @@ if widok == "Kursy walut":
 # ── AKCJE ─────────────────────────────────────────────────
 else:
 
-    with engine.connect() as conn:
-        tickery = [r[0] for r in conn.execute(
-            text("SELECT DISTINCT ticker FROM stock_prices ORDER BY 1")
-        )]
-
-    ticker = st.sidebar.selectbox("Ticker", tickery)
-
-    ma20 = st.sidebar.checkbox("MA20", value=True)
-    ma50 = st.sidebar.checkbox("MA50", value=True)
-
+    tickery     = get_tickers()
+    ticker      = st.sidebar.selectbox("Ticker", tickery)
+    ma20        = st.sidebar.checkbox("MA20", value=True)
+    ma50        = st.sidebar.checkbox("MA50", value=True)
     typ_wykresu = st.sidebar.radio("Typ wykresu", ["Candlestick", "Linia"])
 
-    query = text("""
-        SELECT date, open, high, low, close, volume
-        FROM stock_prices
-        WHERE ticker = :ticker
-          AND date BETWEEN :start AND :end
-        ORDER BY date
-    """)
-
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn,
-                         params={"ticker": ticker, "start": start, "end": end})
+    df = get_stock_prices(ticker, start, end)
 
     if df.empty:
         st.warning("Brak danych dla wybranego zakresu.")
         st.stop()
 
     df = df.set_index("date")
-
-    # srednie kroczace - liczysz na pelnej historii zeby MA bylo dokladne
-    # przy krotkim zakresie dat MA moze byc NaN na poczatku
     df["MA20"] = df["close"].rolling(window=20).mean()
     df["MA50"] = df["close"].rolling(window=50).mean()
 
@@ -132,7 +145,6 @@ else:
 
     fig2 = go.Figure()
 
-    # glowny wykres: candlestick albo linia
     if typ_wykresu == "Candlestick":
         fig2.add_trace(go.Candlestick(
             x=df.index,
@@ -141,8 +153,8 @@ else:
             low=df["low"],
             close=df["close"],
             name=ticker,
-            increasing_line_color="#26A69A",   # zielony = wzrost
-            decreasing_line_color="#EF5350",   # czerwony = spadek
+            increasing_line_color="#26A69A",
+            decreasing_line_color="#EF5350",
         ))
     else:
         fig2.add_trace(go.Scatter(
@@ -153,7 +165,6 @@ else:
             line=dict(color="#00CC96"),
         ))
 
-    # srednie kroczace
     if ma20:
         fig2.add_trace(go.Scatter(
             x=df.index,
@@ -174,17 +185,13 @@ else:
 
     fig2.update_layout(
         yaxis=dict(autorange=True, tickformat=".2f"),
-        xaxis=dict(
-            rangeslider=dict(visible=True),
-            type="date",
-        ),
+        xaxis=dict(rangeslider=dict(visible=False), type="date"),
         hovermode="x unified",
         height=500,
         margin=dict(l=0, r=0, t=30, b=0),
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # wykres wolumenu pod spodem
     fig_vol = go.Figure()
     fig_vol.add_trace(go.Bar(
         x=df.index,
@@ -194,13 +201,12 @@ else:
     ))
     fig_vol.update_layout(
         height=150,
-        margin=dict(l=0, r=0, t=10, b=0),
+        margin=dict(l=0, r=0, t=0, b=0),
         yaxis=dict(title="Wolumen"),
         showlegend=False,
     )
     st.plotly_chart(fig_vol, use_container_width=True)
 
-    # metryki
     ostatni   = df["close"].iloc[-1]
     poprzedni = df["close"].iloc[-2]
     delta_pct = (ostatni - poprzedni) / poprzedni * 100
