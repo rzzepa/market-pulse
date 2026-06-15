@@ -2,11 +2,12 @@ import yfinance as yf
 import pandas as pd
 from datetime import date, timedelta
 from sqlalchemy import text
+import argparse
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DB_CONFIG, TICKERS
-from src.extract_nbp import get_engine
+from config import TICKERS
+from src.db import get_engine
 
 
 def fetch_stock(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -18,7 +19,6 @@ def fetch_stock(ticker: str, start: date, end: date) -> pd.DataFrame:
             print(f"  Brak danych dla {ticker}")
             return pd.DataFrame()
 
-        # yfinance zwraca MultiIndex na kolumnach - splaszczamy
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0].lower().replace(" ", "_") for col in df.columns]
         else:
@@ -36,13 +36,11 @@ def fetch_stock(ticker: str, start: date, end: date) -> pd.DataFrame:
             "date":      "date",
         })
 
-        df["date"]   = pd.to_datetime(df["date"]).dt.date
-        df["ticker"] = ticker
-
-        # waluta: GPW to PLN, reszta USD
+        df["date"]     = pd.to_datetime(df["date"]).dt.date
+        df["ticker"]   = ticker
         df["currency"] = "PLN" if ticker.endswith(".WA") else "USD"
 
-        cols = ["date", "ticker", "open", "high", "low", "close", "volume", "adj_close", "currency"]
+        cols     = ["date", "ticker", "open", "high", "low", "close", "volume", "adj_close", "currency"]
         existing = [c for c in cols if c in df.columns]
         return df[existing]
 
@@ -56,7 +54,7 @@ def load_to_db(df: pd.DataFrame, engine) -> int:
     if df.empty:
         return 0
 
-    rows = df.to_dict(orient="records")
+    rows  = df.to_dict(orient="records")
     query = text("""
         INSERT INTO stock_prices
             (date, ticker, open, high, low, close, volume, adj_close, currency)
@@ -70,26 +68,137 @@ def load_to_db(df: pd.DataFrame, engine) -> int:
         return result.rowcount
 
 
-def run(start: date, end: date):
-    engine = get_engine()
-    print(f"Zakres dat: {start} → {end}")
+def get_last_date_stock(ticker: str, engine) -> date:
+    """Zwraca ostatnia date w bazie dla danego tickera.
+    Jak brak danych - zwraca 365 dni temu."""
+    query = text("""
+        SELECT MAX(date) FROM stock_prices
+        WHERE ticker = :ticker
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(query, {"ticker": ticker}).scalar()
+
+    if result is None:
+        return date.today() - timedelta(days=365)
+    return result
+
+
+def get_gaps_stock(ticker: str, engine) -> list:
+    """Znajduje luki w danych dla danego tickera."""
+    query = text("""
+        SELECT date FROM stock_prices
+        WHERE ticker = :ticker
+        ORDER BY date
+    """)
+    with engine.connect() as conn:
+        daty_w_bazie = set(r[0] for r in conn.execute(query, {"ticker": ticker}))
+
+    if not daty_w_bazie:
+        return []
+
+    start = min(daty_w_bazie)
+    end   = max(daty_w_bazie)
+
+    wszystkie_dni_robocze = set(
+        d for d in pd.date_range(start, end, freq="B").date
+    )
+
+    luki = sorted(wszystkie_dni_robocze - daty_w_bazie)
+    return luki
+
+
+def fill_gaps_stock(ticker: str, engine) -> int:
+    """Wypelnia luki w danych dla danego tickera."""
+    from itertools import groupby
+    from operator import itemgetter
+
+    luki = get_gaps_stock(ticker, engine)
+    if not luki:
+        print(f"  {ticker}: brak luk")
+        return 0
+
+    zakresy = []
+    for k, g in groupby(enumerate(luki), lambda x: x[0] - (x[1] - luki[0]).days):
+        grupa = list(map(itemgetter(1), g))
+        zakresy.append((grupa[0], grupa[-1]))
+
+    inserted = 0
+    for start, end in zakresy:
+        print(f"  Wypelniam luke {start} -> {end}...")
+        df = fetch_stock(ticker, start, end)
+        inserted += load_to_db(df, engine)
+
+    return inserted
+
+
+def run(mode: str = "daily", history_start: date = None):
+    """
+    Tryby:
+    - initial   : pobiera historie od history_start do dzis
+    - daily     : pobiera od ostatniej daty w bazie do dzis
+    - gap_check : sprawdza i wypelnia luki
+    """
+    engine     = get_engine()
+    all_tickers = [t for group in TICKERS.values() for t in group]
+
+    print(f"Tryb: {mode}")
+    print(f"Tickery: {all_tickers}")
     print()
 
-    # splaszczamy slownik tickerow w jedna liste
-    all_tickers = [t for group in TICKERS.values() for t in group]
     total = 0
 
     for ticker in all_tickers:
-        print(f"Pobieram {ticker}...")
-        df = fetch_stock(ticker, start, end)
-        inserted = load_to_db(df, engine)
-        print(f"  Wrzucono {inserted} rekordow")
+        print(f"--- {ticker} ---")
+
+        if mode == "initial":
+            start = history_start or date(2020, 1, 1)
+            end   = date.today()
+            print(f"  Pobieram historie od {start}...")
+            df = fetch_stock(ticker, start, end)
+            inserted = load_to_db(df, engine)
+            print(f"  Wrzucono {inserted} rekordow")
+
+        elif mode == "daily":
+            last_date = get_last_date_stock(ticker, engine)
+            start     = last_date + timedelta(days=1)
+            end       = date.today()
+
+            if start > end:
+                print(f"  Aktualne, nic do pobrania")
+                inserted = 0
+            else:
+                print(f"  Pobieram {start} -> {end}...")
+                df = fetch_stock(ticker, start, end)
+                inserted = load_to_db(df, engine)
+                print(f"  Wrzucono {inserted} rekordow")
+
+        elif mode == "gap_check":
+            inserted = fill_gaps_stock(ticker, engine)
+            print(f"  Wypelniono {inserted} rekordow")
+
+        else:
+            print(f"  Nieznany tryb: {mode}")
+            inserted = 0
+
         total += inserted
 
-    print(f"\nGotowe. Lacznie wrzucono: {total} rekordow.")
+    print(f"\nGotowe. Lacznie: {total} rekordow.")
 
 
 if __name__ == "__main__":
-    end   = date.today()
-    start = end - timedelta(days=365)
-    run(start, end)
+    parser = argparse.ArgumentParser(description="Market Pulse - Stocks extractor")
+    parser.add_argument(
+        "--mode",
+        choices=["initial", "daily", "gap_check"],
+        default="daily",
+        help="Tryb dzialania: initial/daily/gap_check"
+    )
+    parser.add_argument(
+        "--from",
+        dest="history_start",
+        type=date.fromisoformat,
+        default=date(2020, 1, 1),
+        help="Data poczatkowa dla trybu initial (YYYY-MM-DD)"
+    )
+    args = parser.parse_args()
+    run(mode=args.mode, history_start=args.history_start)

@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.extract_nbp import get_engine
+from src.db import get_engine
 
 st.set_page_config(page_title="Market Pulse", layout="wide")
 st.title("Market Pulse")
@@ -18,7 +18,7 @@ widok = st.sidebar.radio("Widok", ["Kursy walut", "Akcje"])
 
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    start = st.date_input("Od", value=date.today() - timedelta(days=90))
+    start = st.date_input("Od", value=date.today() - timedelta(days=180))
 with col2:
     end = st.date_input("Do", value=date.today())
 
@@ -80,7 +80,7 @@ if widok == "Kursy walut":
         if waluta in pivot.columns:
             ostatni   = pivot[waluta].dropna().iloc[-1]
             poprzedni = pivot[waluta].dropna().iloc[-2]
-            delta = ostatni - poprzedni
+            delta     = ostatni - poprzedni
             cols[i].metric(
                 label=f"{waluta}/PLN",
                 value=f"{ostatni:.4f}",
@@ -100,6 +100,11 @@ else:
 
     ticker = st.sidebar.selectbox("Ticker", tickery)
 
+    ma20 = st.sidebar.checkbox("MA20", value=True)
+    ma50 = st.sidebar.checkbox("MA50", value=True)
+
+    typ_wykresu = st.sidebar.radio("Typ wykresu", ["Candlestick", "Linia"])
+
     query = text("""
         SELECT date, open, high, low, close, volume
         FROM stock_prices
@@ -118,34 +123,94 @@ else:
 
     df = df.set_index("date")
 
-    st.subheader(f"{ticker} -- cena zamkniecia ({start} -> {end})")
+    # srednie kroczace - liczysz na pelnej historii zeby MA bylo dokladne
+    # przy krotkim zakresie dat MA moze byc NaN na poczatku
+    df["MA20"] = df["close"].rolling(window=20).mean()
+    df["MA50"] = df["close"].rolling(window=50).mean()
+
+    st.subheader(f"{ticker} ({start} -> {end})")
 
     fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(
-        x=df.index,
-        y=df["close"],
-        name="Close",
-        mode="lines",
-        line=dict(color="#00CC96"),
-    ))
+
+    # glowny wykres: candlestick albo linia
+    if typ_wykresu == "Candlestick":
+        fig2.add_trace(go.Candlestick(
+            x=df.index,
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=ticker,
+            increasing_line_color="#26A69A",   # zielony = wzrost
+            decreasing_line_color="#EF5350",   # czerwony = spadek
+        ))
+    else:
+        fig2.add_trace(go.Scatter(
+            x=df.index,
+            y=df["close"],
+            name="Close",
+            mode="lines",
+            line=dict(color="#00CC96"),
+        ))
+
+    # srednie kroczace
+    if ma20:
+        fig2.add_trace(go.Scatter(
+            x=df.index,
+            y=df["MA20"],
+            name="MA20",
+            mode="lines",
+            line=dict(color="#FFA726", width=1.5, dash="dot"),
+        ))
+
+    if ma50:
+        fig2.add_trace(go.Scatter(
+            x=df.index,
+            y=df["MA50"],
+            name="MA50",
+            mode="lines",
+            line=dict(color="#AB47BC", width=1.5, dash="dash"),
+        ))
+
     fig2.update_layout(
         yaxis=dict(autorange=True, tickformat=".2f"),
-        xaxis=dict(rangeslider=dict(visible=True), type="date"),
+        xaxis=dict(
+            rangeslider=dict(visible=True),
+            type="date",
+        ),
         hovermode="x unified",
-        height=450,
+        height=500,
         margin=dict(l=0, r=0, t=30, b=0),
     )
     st.plotly_chart(fig2, use_container_width=True)
 
+    # wykres wolumenu pod spodem
+    fig_vol = go.Figure()
+    fig_vol.add_trace(go.Bar(
+        x=df.index,
+        y=df["volume"],
+        name="Volume",
+        marker_color="#42A5F5",
+    ))
+    fig_vol.update_layout(
+        height=150,
+        margin=dict(l=0, r=0, t=10, b=0),
+        yaxis=dict(title="Wolumen"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_vol, use_container_width=True)
+
+    # metryki
     ostatni   = df["close"].iloc[-1]
     poprzedni = df["close"].iloc[-2]
     delta_pct = (ostatni - poprzedni) / poprzedni * 100
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ostatnia cena", f"{ostatni:.2f}",  f"{delta_pct:+.2f}%")
+    c1.metric("Ostatnia cena", f"{ostatni:.2f}",          f"{delta_pct:+.2f}%")
     c2.metric("Max (zakres)",  f"{df['high'].max():.2f}")
     c3.metric("Min (zakres)",  f"{df['low'].min():.2f}")
     c4.metric("Sr. wolumen",   f"{df['volume'].mean():,.0f}")
 
     st.subheader("Dane tabelaryczne")
-    st.dataframe(df.sort_index(ascending=False).head(30), use_container_width=True)
+    st.dataframe(df[["open","high","low","close","volume"]].sort_index(ascending=False).head(30),
+                 use_container_width=True)
