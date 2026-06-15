@@ -1,0 +1,35 @@
+version: 2
+
+sources:
+  - name: market_pulse
+    database: market_pulse_db
+    schema: public
+    tables:
+      - name: exchange_rates
+        description: "Dzienne kursy walut z NBP API"
+        columns:
+          - name: date
+            description: "Data notowania"
+            tests:
+              - not_null
+          - name: currency_code
+            description: "Kod waluty ISO 4217"
+            tests:
+              - not_null
+          - name: rate
+            description: "Kurs sredni NBP"
+            tests:
+              - not_null
+
+      - name: stock_prices
+        description: "Dzienne ceny akcji z Yahoo Finance"
+        columns:
+          - name: date
+            tests:
+              - not_null
+          - name: ticker
+            tests:
+              - not_null
+          - name: close
+            tests:
+              - not_null
