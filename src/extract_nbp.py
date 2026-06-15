@@ -122,12 +122,6 @@ def fill_gaps(currency: str, engine) -> int:
 
 
 def run(mode: str = "daily", history_start: date = None):
-    """
-    Tryby:
-    - initial   : pobiera historie od history_start do dzis
-    - daily     : pobiera od ostatniej daty w bazie do dzis
-    - gap_check : sprawdza i wypelnia luki
-    """
     engine = get_engine()
     print(f"Tryb: {mode}")
     print(f"Waluty: {CURRENCIES}")
@@ -142,9 +136,18 @@ def run(mode: str = "daily", history_start: date = None):
             start = history_start or date(2020, 1, 1)
             end   = date.today()
             print(f"  Pobieram historie od {start}...")
-            df = fetch_rates(currency, start, end)
-            inserted = load_to_db(df, engine)
-            print(f"  Wrzucono {inserted} rekordow")
+
+            # paginacja po 90 dni bo NBP nie przyjmuje dluzszych zakresow
+            inserted = 0
+            current = start
+            while current < end:
+                chunk_end = min(current + timedelta(days=90), end)
+                df = fetch_rates(currency, current, chunk_end)
+                inserted += load_to_db(df, engine)
+                print(f"  {current} -> {chunk_end}: {len(df)} rekordow")
+                current = chunk_end + timedelta(days=1)
+
+            print(f"  Lacznie wrzucono: {inserted} rekordow")
 
         elif mode == "daily":
             last_date = get_last_date(currency, engine)
@@ -158,7 +161,8 @@ def run(mode: str = "daily", history_start: date = None):
                 print(f"  Pobieram {start} -> {end}...")
                 df = fetch_rates(currency, start, end)
                 inserted = load_to_db(df, engine)
-                print(f"  Wrzucono {inserted} rekordow")
+                if inserted > 0:
+                    print(f"  Wrzucono {inserted} rekordow")
 
         elif mode == "gap_check":
             inserted = fill_gaps(currency, engine)
@@ -171,22 +175,3 @@ def run(mode: str = "daily", history_start: date = None):
         total += inserted
 
     print(f"\nGotowe. Lacznie: {total} rekordow.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Market Pulse - NBP extractor")
-    parser.add_argument(
-        "--mode",
-        choices=["initial", "daily", "gap_check"],
-        default="daily",
-        help="Tryb dzialania: initial/daily/gap_check"
-    )
-    parser.add_argument(
-        "--from",
-        dest="history_start",
-        type=date.fromisoformat,
-        default=date(2020, 1, 1),
-        help="Data poczatkowa dla trybu initial (YYYY-MM-DD)"
-    )
-    args = parser.parse_args()
-    run(mode=args.mode, history_start=args.history_start)

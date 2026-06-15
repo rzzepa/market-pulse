@@ -7,3 +7,4 @@ streamlit
 matplotlib
 python-dotenv
 holidays
+plotly
