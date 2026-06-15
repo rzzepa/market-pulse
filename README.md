@@ -77,26 +77,25 @@ pip install -r requirements.txt
 **2. Create `.env` file:**
 ```
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=5433
 DB_NAME=market_pulse_db
 DB_USER=postgres
 DB_PASSWORD=your_password
 ```
 
-**3. Create database and run DDL:**
-
-Create `market_pulse_db` in PostgreSQL, then run `schema.sql`.
+**3. Start all services:**
+```bash
+docker compose up -d
+```
 
 **4. Load historical data:**
 ```bash
-python src/extract_nbp.py --mode initial --from 2020-01-01
-python src/extract_stocks.py --mode initial --from 2020-01-01
+python src/extract_nbp.py --mode initial --from 2025-01-01
+python src/extract_stocks.py --mode initial --from 2025-01-01
 ```
 
-**5. Launch dashboard:**
-```bash
-streamlit run src/dashboard.py
-```
+**5. Open dashboard:**
+http://localhost:8501
 
 **6. Daily updates:**
 ```bash
