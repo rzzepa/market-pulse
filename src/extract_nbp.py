@@ -175,3 +175,21 @@ def run(mode: str = "daily", history_start: date = None):
         total += inserted
 
     print(f"\nGotowe. Lacznie: {total} rekordow.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Market Pulse - NBP extractor")
+    parser.add_argument(
+        "--mode",
+        choices=["initial", "daily", "gap_check"],
+        default="daily",
+        help="Tryb dzialania: initial/daily/gap_check"
+    )
+    parser.add_argument(
+        "--from",
+        dest="history_start",
+        type=date.fromisoformat,
+        default=date(2020, 1, 1),
+        help="Data poczatkowa dla trybu initial (YYYY-MM-DD)"
+    )
+    args = parser.parse_args()
+    run(mode=args.mode, history_start=args.history_start)

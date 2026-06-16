@@ -1,8 +1,9 @@
 # config.py - NIE wrzucaj haseł tutaj, tylko strukturę
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()  # czyta zmienne z pliku .env
+load_dotenv(Path(__file__).parent / ".env")
 
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST_DOCKER", os.getenv("DB_HOST", "localhost")),
