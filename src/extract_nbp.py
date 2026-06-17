@@ -7,9 +7,11 @@ from operator import itemgetter
 import argparse
 import sys, os
 
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import CURRENCIES
 from src.db import get_engine
+from src.pipeline_logger import log_run
 
 
 def fetch_rates(currency: str, start: date, end: date) -> pd.DataFrame:
@@ -123,58 +125,51 @@ def fill_gaps(currency: str, engine) -> int:
 
 def run(mode: str = "daily", history_start: date = None):
     engine = get_engine()
-    print(f"Tryb: {mode}")
-    print(f"Waluty: {CURRENCIES}")
-    print()
 
-    total = 0
-
-    for currency in CURRENCIES:
-        print(f"--- {currency} ---")
-
-        if mode == "initial":
-            start = history_start or date(2020, 1, 1)
-            end   = date.today()
-            print(f"  Pobieram historie od {start}...")
-
-            # paginacja po 90 dni bo NBP nie przyjmuje dluzszych zakresow
-            inserted = 0
-            current = start
-            while current < end:
-                chunk_end = min(current + timedelta(days=90), end)
-                df = fetch_rates(currency, current, chunk_end)
-                inserted += load_to_db(df, engine)
-                print(f"  {current} -> {chunk_end}: {len(df)} rekordow")
-                current = chunk_end + timedelta(days=1)
-
-            print(f"  Lacznie wrzucono: {inserted} rekordow")
-
-        elif mode == "daily":
-            last_date = get_last_date(currency, engine)
-            start = last_date + timedelta(days=1)
-            end   = date.today()
-
-            if start > end:
-                print(f"  Aktualne, nic do pobrania")
+    with log_run("extract_nbp", mode, engine) as pipeline_run:
+        print(f"Tryb: {mode}")
+        print(f"Waluty: {CURRENCIES}")
+        print()
+        total = 0
+        for currency in CURRENCIES:
+            print(f"--- {currency} ---")
+            if mode == "initial":
+                start = history_start or date(2020, 1, 1)
+                end   = date.today()
+                print(f"  Pobieram historie od {start}...")
+                # paginacja po 90 dni bo NBP nie przyjmuje dluzszych zakresow
                 inserted = 0
+                current = start
+                while current < end:
+                    chunk_end = min(current + timedelta(days=90), end)
+                    df = fetch_rates(currency, current, chunk_end)
+                    inserted += load_to_db(df, engine)
+                    print(f"  {current} -> {chunk_end}: {len(df)} rekordow")
+                    current = chunk_end + timedelta(days=1)
+                print(f"  Lacznie wrzucono: {inserted} rekordow")
+            elif mode == "daily":
+                last_date = get_last_date(currency, engine)
+                start = last_date + timedelta(days=1)
+                end   = date.today()
+                if start > end:
+                    print(f"  Aktualne, nic do pobrania")
+                    inserted = 0
+                else:
+                    print(f"  Pobieram {start} -> {end}...")
+                    df = fetch_rates(currency, start, end)
+                    inserted = load_to_db(df, engine)
+                    if inserted > 0:
+                        print(f"  Wrzucono {inserted} rekordow")
+            elif mode == "gap_check":
+                inserted = fill_gaps(currency, engine)
+                print(f"  Wypelniono {inserted} rekordow")
             else:
-                print(f"  Pobieram {start} -> {end}...")
-                df = fetch_rates(currency, start, end)
-                inserted = load_to_db(df, engine)
-                if inserted > 0:
-                    print(f"  Wrzucono {inserted} rekordow")
+                print(f"  Nieznany tryb: {mode}")
+                inserted = 0
+            total += inserted
 
-        elif mode == "gap_check":
-            inserted = fill_gaps(currency, engine)
-            print(f"  Wypelniono {inserted} rekordow")
-
-        else:
-            print(f"  Nieznany tryb: {mode}")
-            inserted = 0
-
-        total += inserted
-
-    print(f"\nGotowe. Lacznie: {total} rekordow.")
+        pipeline_run["rows_inserted"] = total
+        print(f"\nGotowe. Lacznie: {total} rekordow.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Market Pulse - NBP extractor")

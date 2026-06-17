@@ -32,12 +32,21 @@ def get_exchange_rates(waluty: tuple, start, end) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def get_stock_prices(ticker: str, start, end) -> pd.DataFrame:
     query = text("""
-        SELECT price_date as date, open_price as open, high_price as high,
-               low_price as low, close_price as close, volume, ma20, ma50
-        FROM dbt_dev.fct_stock_performance
-        WHERE ticker = :ticker
-          AND price_date BETWEEN :start AND :end
-        ORDER BY price_date
+        SELECT
+            sp.date,
+            sp.open,
+            sp.high,
+            sp.low,
+            sp.close,
+            sp.volume,
+            fp.ma20,
+            fp.ma50
+        FROM stock_prices sp
+        LEFT JOIN dbt_dev.fct_stock_performance fp
+            ON sp.ticker = fp.ticker AND sp.date = fp.price_date
+        WHERE sp.ticker = :ticker
+          AND sp.date BETWEEN :start AND :end
+        ORDER BY sp.date
     """)
     with engine.connect() as conn:
         return pd.read_sql(query, conn,
@@ -73,9 +82,41 @@ def get_tickers() -> list:
         )]
 
 
+@st.cache_data(ttl=60)
+def get_pipeline_runs(limit: int = 50) -> pd.DataFrame:
+    query = text("""
+        SELECT pipeline_name, mode, started_at, finished_at, status,
+               rows_inserted, error_message,
+               EXTRACT(EPOCH FROM (finished_at - started_at)) as duration_sec
+        FROM pipeline_runs
+        ORDER BY started_at DESC
+        LIMIT :limit
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"limit": limit})
+
+
+@st.cache_data(ttl=60)
+def get_pipeline_summary() -> pd.DataFrame:
+    query = text("""
+        SELECT
+            pipeline_name,
+            MAX(started_at) FILTER (WHERE status = 'success') as last_success,
+            MAX(started_at) as last_run,
+            COUNT(*) FILTER (WHERE started_at > now() - interval '30 days') as runs_30d,
+            COUNT(*) FILTER (WHERE status = 'success' AND started_at > now() - interval '30 days') as success_30d,
+            COUNT(*) FILTER (WHERE status = 'failed' AND started_at > now() - interval '7 days') as failed_7d
+        FROM pipeline_runs
+        GROUP BY pipeline_name
+        ORDER BY pipeline_name
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
 # ── SIDEBAR ───────────────────────────────────────────────
 st.sidebar.header("Filtry")
-widok = st.sidebar.radio("Widok", ["Kursy walut", "Analiza miesięczna", "Akcje"])
+widok = st.sidebar.radio("Widok", ["Kursy walut", "Analiza miesięczna", "Akcje", "Data Quality"])
 
 # ── KURSY WALUT ───────────────────────────────────────────
 if widok == "Kursy walut":
@@ -201,7 +242,7 @@ elif widok == "Analiza miesięczna":
     st.dataframe(d.sort_index(ascending=False), use_container_width=True)
 
 # ── AKCJE ─────────────────────────────────────────────────
-else:
+elif widok == "Akcje":
 
     col1, col2 = st.sidebar.columns(2)
     with col1:
@@ -302,3 +343,113 @@ else:
     st.subheader("Dane tabelaryczne")
     st.dataframe(df[["open","high","low","close","volume","ma20","ma50"]].sort_index(ascending=False).head(30),
                  use_container_width=True)
+
+# ── DATA QUALITY ──────────────────────────────────────────
+else:
+
+    st.subheader("Zdrowie pipeline'u")
+
+    summary = get_pipeline_summary()
+
+    if summary.empty:
+        st.warning("Brak zarejestrowanych uruchomien pipeline'u.")
+        st.stop()
+
+    now = pd.Timestamp.now()
+
+    cols = st.columns(len(summary))
+    for i, row in summary.iterrows():
+        ostatni_sukces = row["last_success"]
+
+        if pd.isna(ostatni_sukces):
+            cols[i].metric(row["pipeline_name"], "brak danych")
+            continue
+
+        godziny_temu = (now - ostatni_sukces).total_seconds() / 3600
+
+        if godziny_temu < 36:
+            status_label = f"{godziny_temu:.0f}h temu"
+            delta_color = "normal"
+        else:
+            dni_temu = godziny_temu / 24
+            status_label = f"{dni_temu:.0f}d temu"
+            delta_color = "inverse"
+
+        wskaznik_sukcesu = (
+            row["success_30d"] / row["runs_30d"] * 100
+            if row["runs_30d"] > 0 else 0
+        )
+
+        cols[i].metric(
+            label=row["pipeline_name"],
+            value=status_label,
+            delta=f"{wskaznik_sukcesu:.0f}% sukcesow (30d)",
+            delta_color=delta_color if row["failed_7d"] == 0 else "off",
+        )
+
+        if row["failed_7d"] > 0:
+            cols[i].caption(f"⚠️ {row['failed_7d']} blad(y) w ostatnich 7 dniach")
+
+    st.subheader("Historia uruchomien")
+
+    runs = get_pipeline_runs(limit=50)
+
+    if runs.empty:
+        st.info("Brak historii uruchomien.")
+        st.stop()
+
+    runs_display = runs.copy()
+    runs_display["started_at"] = pd.to_datetime(runs_display["started_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+    runs_display["duration_sec"] = runs_display["duration_sec"].round(2)
+
+    def koloruj_status(status):
+        if status == "success":
+            return "background-color: #1b3a1f"
+        elif status == "failed":
+            return "background-color: #4a1414"
+        else:
+            return "background-color: #4a3a14"
+
+    styled = runs_display[[
+        "pipeline_name", "mode", "started_at", "status",
+        "duration_sec", "rows_inserted", "error_message"
+    ]].rename(columns={
+        "pipeline_name": "Pipeline",
+        "mode": "Tryb",
+        "started_at": "Start",
+        "status": "Status",
+        "duration_sec": "Czas (s)",
+        "rows_inserted": "Rekordy",
+        "error_message": "Blad",
+    }).style.map(koloruj_status, subset=["Status"])
+
+    st.dataframe(styled, use_container_width=True, height=600)
+
+    st.subheader("Wskaznik sukcesu w czasie")
+
+    runs_chart = runs.copy()
+    runs_chart["started_at"] = pd.to_datetime(runs_chart["started_at"])
+    runs_chart["dzien"] = runs_chart["started_at"].dt.date
+    runs_chart["sukces"] = (runs_chart["status"] == "success").astype(int)
+
+    daily_rate = runs_chart.groupby(["dzien", "pipeline_name"])["sukces"].mean().reset_index()
+    daily_rate["sukces_pct"] = daily_rate["sukces"] * 100
+
+    fig_dq = go.Figure()
+    for pname in daily_rate["pipeline_name"].unique():
+        d = daily_rate[daily_rate["pipeline_name"] == pname]
+        fig_dq.add_trace(go.Scatter(
+            x=d["dzien"],
+            y=d["sukces_pct"],
+            name=pname,
+            mode="lines+markers",
+        ))
+
+    fig_dq.update_layout(
+        yaxis=dict(title="% sukcesow", range=[0, 105]),
+        xaxis=dict(title="Dzien"),
+        hovermode="x unified",
+        height=350,
+        margin=dict(l=0, r=0, t=30, b=0),
+    )
+    st.plotly_chart(fig_dq, use_container_width=True)

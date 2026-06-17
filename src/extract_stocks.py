@@ -8,6 +8,7 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TICKERS
 from src.db import get_engine
+from src.pipeline_logger import log_run
 
 
 def fetch_stock(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -154,49 +155,50 @@ def run(mode: str = "daily", history_start: date = None):
     engine     = get_engine()
     all_tickers = [t for group in TICKERS.values() for t in group]
 
-    print(f"Tryb: {mode}")
-    print(f"Tickery: {all_tickers}")
-    print()
+    with log_run("extract_stocks", mode, engine) as pipeline_run:
+        print(f"Tryb: {mode}")
+        print(f"Tickery: {all_tickers}")
+        print()
 
-    total = 0
+        total = 0
 
-    for ticker in all_tickers:
-        print(f"--- {ticker} ---")
+        for ticker in all_tickers:
+            print(f"--- {ticker} ---")
 
-        if mode == "initial":
-            start = history_start or date(2020, 1, 1)
-            end   = date.today()
-            print(f"  Pobieram historie od {start}...")
-            df = fetch_stock(ticker, start, end)
-            inserted = load_to_db(df, engine)
-            print(f"  Wrzucono {inserted} rekordow")
-
-        elif mode == "daily":
-            last_date = get_last_date_stock(ticker, engine)
-            start     = last_date + timedelta(days=1)
-            end       = date.today()
-
-            if start > end:
-                print(f"  Aktualne, nic do pobrania")
-                inserted = 0
-            else:
-                print(f"  Pobieram {start} -> {end}...")
+            if mode == "initial":
+                start = history_start or date(2020, 1, 1)
+                end   = date.today()
+                print(f"  Pobieram historie od {start}...")
                 df = fetch_stock(ticker, start, end)
                 inserted = load_to_db(df, engine)
                 print(f"  Wrzucono {inserted} rekordow")
 
-        elif mode == "gap_check":
-            inserted = fill_gaps_stock(ticker, engine)
-            print(f"  Wypelniono {inserted} rekordow")
+            elif mode == "daily":
+                last_date = get_last_date_stock(ticker, engine)
+                start     = last_date + timedelta(days=1)
+                end       = date.today()
 
-        else:
-            print(f"  Nieznany tryb: {mode}")
-            inserted = 0
+                if start > end:
+                    print(f"  Aktualne, nic do pobrania")
+                    inserted = 0
+                else:
+                    print(f"  Pobieram {start} -> {end}...")
+                    df = fetch_stock(ticker, start, end)
+                    inserted = load_to_db(df, engine)
+                    print(f"  Wrzucono {inserted} rekordow")
 
-        total += inserted
+            elif mode == "gap_check":
+                inserted = fill_gaps_stock(ticker, engine)
+                print(f"  Wypelniono {inserted} rekordow")
 
-    print(f"\nGotowe. Lacznie: {total} rekordow.")
+            else:
+                print(f"  Nieznany tryb: {mode}")
+                inserted = 0
 
+            total += inserted
+
+        pipeline_run["rows_inserted"] = total
+        print(f"\nGotowe. Lacznie: {total} rekordow.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Market Pulse - Stocks extractor")
