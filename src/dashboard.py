@@ -82,6 +82,100 @@ def get_tickers() -> list:
         )]
 
 
+@st.cache_data(ttl=300)
+def get_portfolio_positions() -> pd.DataFrame:
+    query = text("""
+        SELECT
+            pp.ticker,
+            pp.currency,
+            pp.current_quantity,
+            pp.avg_buy_price,
+            pp.total_invested_pln,
+            pp.realized_profit_pln,
+            sp.close as current_price,
+            fx.rate as usd_pln_rate
+        FROM dbt_dev.fct_portfolio_positions pp
+        LEFT JOIN LATERAL (
+            SELECT close
+            FROM stock_prices
+            WHERE ticker = pp.ticker
+            ORDER BY date DESC
+            LIMIT 1
+        ) sp ON true
+        LEFT JOIN LATERAL (
+            SELECT rate
+            FROM exchange_rates
+            WHERE currency_code = 'USD'
+            ORDER BY date DESC
+            LIMIT 1
+        ) fx ON true
+        ORDER BY pp.ticker
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=300)
+def get_portfolio_value_history() -> pd.DataFrame:
+    query = text("""
+        WITH positions AS (
+            SELECT ticker, currency, current_quantity
+            FROM dbt_dev.fct_portfolio_positions
+        ),
+        -- pelny kalendarz dni (nie tylko dni handlowe), zeby kazdy ticker
+        -- mial wartosc kazdego dnia, niezaleznie od lokalnych swiat gieldy
+        calendar AS (
+            SELECT generate_series(
+                (SELECT MIN(date) FROM stock_prices WHERE ticker IN (SELECT ticker FROM positions)),
+                (SELECT MAX(date) FROM stock_prices WHERE ticker IN (SELECT ticker FROM positions)),
+                interval '1 day'
+            )::date AS date
+        ),
+        calendar_positions AS (
+            SELECT c.date, p.ticker, p.currency, p.current_quantity
+            FROM calendar c
+            CROSS JOIN positions p
+        ),
+        -- as-of join: dla kazdego (data, ticker) bierzemy ostatnia ZNANA cene
+        -- (forward-fill) zamiast wymagac dokladnego dopasowania daty
+        priced AS (
+            SELECT
+                cp.date,
+                cp.current_quantity,
+                cp.currency,
+                sp.close AS price,
+                fx.rate AS fx_rate
+            FROM calendar_positions cp
+            LEFT JOIN LATERAL (
+                SELECT close
+                FROM stock_prices
+                WHERE ticker = cp.ticker AND date <= cp.date
+                ORDER BY date DESC
+                LIMIT 1
+            ) sp ON true
+            LEFT JOIN LATERAL (
+                SELECT rate
+                FROM exchange_rates
+                WHERE currency_code = 'USD' AND date <= cp.date
+                ORDER BY date DESC
+                LIMIT 1
+            ) fx ON true
+        )
+        SELECT
+            date,
+            SUM(
+                price * current_quantity *
+                CASE WHEN currency = 'PLN' THEN 1 ELSE fx_rate END
+            ) AS portfolio_value
+        FROM priced
+        WHERE price IS NOT NULL
+        GROUP BY date
+        ORDER BY date
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
 @st.cache_data(ttl=60)
 def get_pipeline_runs(limit: int = 50) -> pd.DataFrame:
     query = text("""
@@ -116,7 +210,7 @@ def get_pipeline_summary() -> pd.DataFrame:
 
 # ── SIDEBAR ───────────────────────────────────────────────
 st.sidebar.header("Filtry")
-widok = st.sidebar.radio("Widok", ["Kursy walut", "Analiza miesięczna", "Akcje", "Data Quality"])
+widok = st.sidebar.radio("Widok", ["Kursy walut", "Analiza miesięczna", "Akcje", "Portfel", "Data Quality"])
 
 # ── KURSY WALUT ───────────────────────────────────────────
 if widok == "Kursy walut":
@@ -343,6 +437,136 @@ elif widok == "Akcje":
     st.subheader("Dane tabelaryczne")
     st.dataframe(df[["open","high","low","close","volume","ma20","ma50"]].sort_index(ascending=False).head(30),
                  use_container_width=True)
+
+# ── PORTFEL ───────────────────────────────────────────────
+elif widok == "Portfel":
+
+    positions = get_portfolio_positions()
+
+    if positions.empty:
+        st.warning("Brak pozycji w portfelu.")
+        st.stop()
+
+    positions["current_price"]      = positions["current_price"].astype(float)
+    positions["avg_buy_price"]      = positions["avg_buy_price"].astype(float)
+    positions["current_quantity"]   = positions["current_quantity"].astype(float)
+    positions["total_invested_pln"] = positions["total_invested_pln"].astype(float)
+    positions["realized_profit_pln"] = positions["realized_profit_pln"].astype(float)
+    positions["usd_pln_rate"]       = positions["usd_pln_rate"].astype(float)
+
+    # aktualna wartosc pozycji przeliczona na PLN po dzisiejszym kursie
+    positions["current_value_pln"] = positions.apply(
+        lambda r: r["current_price"] * r["current_quantity"] *
+                  (1.0 if r["currency"] == "PLN" else r["usd_pln_rate"]),
+        axis=1
+    )
+
+    positions["unrealized_profit_pln"] = (
+        positions["current_value_pln"] - positions["total_invested_pln"]
+    )
+    positions["unrealized_profit_pct"] = (
+        positions["unrealized_profit_pln"] / positions["total_invested_pln"] * 100
+    )
+
+    total_invested       = positions["total_invested_pln"].sum()
+    total_value           = positions["current_value_pln"].sum()
+    total_unrealized       = positions["unrealized_profit_pln"].sum()
+    total_realized         = positions["realized_profit_pln"].sum()
+    total_unrealized_pct   = (total_unrealized / total_invested * 100) if total_invested else 0
+
+    st.caption("Wszystkie wartosci przeliczone na PLN po aktualnym kursie NBP "
+               "(srednia cena zakupu pokazana w walucie oryginalnej instrumentu).")
+
+    st.subheader("Podsumowanie portfela")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Zainwestowano", f"{total_invested:,.0f} PLN")
+    c2.metric("Aktualna wartosc", f"{total_value:,.0f} PLN")
+    c3.metric("Zysk niezrealizowany", f"{total_unrealized:+,.0f} PLN", f"{total_unrealized_pct:+.1f}%")
+    c4.metric("Zysk zrealizowany", f"{total_realized:+,.0f} PLN")
+
+    st.subheader("Pozycje")
+
+    display = positions[[
+        "ticker", "currency", "current_quantity", "avg_buy_price", "current_price",
+        "current_value_pln", "unrealized_profit_pln", "unrealized_profit_pct", "realized_profit_pln"
+    ]].rename(columns={
+        "ticker": "Ticker",
+        "currency": "Waluta",
+        "current_quantity": "Ilosc",
+        "avg_buy_price": "Sr. cena zakupu",
+        "current_price": "Aktualna cena",
+        "current_value_pln": "Wartosc (PLN)",
+        "unrealized_profit_pln": "Zysk niezrealizowany (PLN)",
+        "unrealized_profit_pct": "Zysk %",
+        "realized_profit_pln": "Zysk zrealizowany (PLN)",
+    })
+
+    st.dataframe(
+        display.style.format({
+            "Ilosc": "{:.2f}",
+            "Sr. cena zakupu": "{:.2f}",
+            "Aktualna cena": "{:.2f}",
+            "Wartosc (PLN)": "{:,.2f}",
+            "Zysk niezrealizowany (PLN)": "{:+,.2f}",
+            "Zysk %": "{:+.1f}%",
+            "Zysk zrealizowany (PLN)": "{:+,.2f}",
+        }),
+        use_container_width=True
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Alokacja portfela")
+        fig_pie = go.Figure(data=[go.Pie(
+            labels=positions["ticker"],
+            values=positions["current_value_pln"],
+            hole=0.4,
+        )])
+        fig_pie.update_layout(
+            height=350,
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col2:
+        st.subheader("Zysk/strata per pozycja (PLN)")
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            x=positions["ticker"],
+            y=positions["unrealized_profit_pln"],
+            marker_color=["#26A69A" if v >= 0 else "#EF5350" for v in positions["unrealized_profit_pln"]],
+        ))
+        fig_bar.update_layout(
+            height=350,
+            margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="Zysk/strata (PLN)"),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.subheader("Wartosc portfela w czasie (PLN)")
+
+    history = get_portfolio_value_history()
+
+    if not history.empty:
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Scatter(
+            x=history["date"],
+            y=history["portfolio_value"],
+            mode="lines",
+            fill="tozeroy",
+            line=dict(color="#26A69A"),
+        ))
+        fig_hist.update_layout(
+            height=350,
+            margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="Wartosc portfela"),
+            xaxis=dict(type="date"),
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+    else:
+        st.info("Brak historii do wyswietlenia.")
 
 # ── DATA QUALITY ──────────────────────────────────────────
 else:

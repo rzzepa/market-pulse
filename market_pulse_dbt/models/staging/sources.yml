@@ -33,3 +33,17 @@ sources:
           - name: close
             tests:
               - not_null
+              
+      - name: portfolio_transactions
+        description: "Transakcje kupna/sprzedazy w portfelu"
+        columns:
+          - name: ticker
+            tests:
+              - not_null
+          - name: transaction_type
+            tests:
+              - not_null
+          - name: quantity
+            tests:
+              - not_null
+ 
