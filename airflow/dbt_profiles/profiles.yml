@@ -1,0 +1,12 @@
+market_pulse_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: host.docker.internal
+      port: 5433
+      user: postgres
+      password: "{{ env_var('DB_PASSWORD') }}"
+      dbname: market_pulse_db
+      schema: dbt_dev
+      threads: 4

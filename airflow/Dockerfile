@@ -6,4 +6,5 @@ RUN pip install --no-cache-dir \
     "pandas" \
     "holidays" \
     "sqlalchemy" \
-    "psycopg2-binary"
+    "psycopg2-binary" \
+    "click==8.1.7"

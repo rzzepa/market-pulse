@@ -26,6 +26,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ../:/opt/airflow/project
+    - ${AIRFLOW_PROJ_DIR:-.}/dbt_profiles:/opt/airflow/dbt_profiles
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
