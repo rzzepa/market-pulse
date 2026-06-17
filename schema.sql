@@ -136,3 +136,39 @@ CREATE TABLE news_tickers (
     ticker      VARCHAR(20) NOT NULL,            -- AAPL, CDR.WA, EUR
     PRIMARY KEY (event_id, ticker)
 );
+
+
+-- Audyt uruchomień pipeline'u (Data Quality dashboard)
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id SERIAL PRIMARY KEY,
+    pipeline_name VARCHAR(50) NOT NULL,
+    mode VARCHAR(20),
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    status VARCHAR(20),
+    rows_inserted INT DEFAULT 0,
+    error_message TEXT
+);
+ 
+-- Transakcje portfela (Portfolio tracker)
+CREATE TABLE IF NOT EXISTS portfolio_transactions (
+    id SERIAL PRIMARY KEY,
+    ticker VARCHAR(20) NOT NULL,
+    transaction_type VARCHAR(4) NOT NULL CHECK (transaction_type IN ('buy', 'sell')),
+    quantity NUMERIC(12,4) NOT NULL CHECK (quantity > 0),
+    price NUMERIC(12,4) NOT NULL CHECK (price > 0),
+    transaction_date DATE NOT NULL,
+    notes TEXT
+);
+ 
+-- Reguly alertow cenowych
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id SERIAL PRIMARY KEY,
+    ticker VARCHAR(20) NOT NULL,
+    condition_type VARCHAR(10) NOT NULL CHECK (condition_type IN ('above', 'below')),
+    threshold NUMERIC(12,4) NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    last_triggered_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT now()
+);
+ 
